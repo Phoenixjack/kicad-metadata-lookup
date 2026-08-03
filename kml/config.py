@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,35 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PRIVATE_DATA_PATH = PROJECT_ROOT / "kml_private_data.json"
 PRIVATE_DATA_EXAMPLE_PATH = PROJECT_ROOT / "kml_private_data.example.json"
+DEFAULT_PRIVATE_DATA: dict[str, Any] = {
+    "config_schema_version": 1,
+    "api_integrations": {
+        "providers": {
+            "mouser": {
+                "enabled": False,
+                "api_key": "",
+            },
+            "digikey": {
+                "enabled": False,
+                "client_id": "",
+                "client_secret": "",
+            },
+            "octopart_nexar": {
+                "enabled": False,
+                "client_id": "",
+                "client_secret": "",
+            },
+        },
+    },
+    "gui": {
+        "window_geometry": "",
+        "last_provider": "mouser",
+    },
+    "lookup": {
+        "last_mpn": "",
+        "last_manufacturer": "",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -23,7 +51,7 @@ class ProviderStatus:
 def ensure_private_data_file() -> None:
     if PRIVATE_DATA_PATH.exists():
         return
-    shutil.copy2(PRIVATE_DATA_EXAMPLE_PATH, PRIVATE_DATA_PATH)
+    save_private_data(copy.deepcopy(DEFAULT_PRIVATE_DATA))
 
 
 def load_private_data() -> dict[str, Any]:

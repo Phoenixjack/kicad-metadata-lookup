@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
         self.current_item: KiCadItem | None = None
         self.current_symbol_library: Path | None = None
         self.current_lookup_result: LookupResult | None = None
+        self.suggestion_assignments: dict[int, tuple[str, str]] = {}
         self.private_data = load_private_data()
 
         self.source_label = QLabel("No KiCad item loaded.")
@@ -407,6 +408,7 @@ class MainWindow(QMainWindow):
     def _set_item(self, item: KiCadItem) -> None:
         self.current_item = item
         self.current_lookup_result = None
+        self.suggestion_assignments.clear()
         self.result_combo.blockSignals(True)
         self.result_combo.clear()
         self.result_combo.setEnabled(False)
@@ -447,6 +449,7 @@ class MainWindow(QMainWindow):
 
     def apply_suggestions(self, part: ProviderPart | None) -> None:
         suggestions = part.fields if part else {}
+        self.suggestion_assignments.clear()
         for row in range(self.metadata_table.rowCount()):
             self._set_separator_item(row)
             self.metadata_table.setItem(row, SUGGESTED_FIELD_COLUMN, QTableWidgetItem(""))
@@ -485,14 +488,13 @@ class MainWindow(QMainWindow):
     def _set_assign_combo(self, row: int, suggested_field: str, field_names: list[str]) -> None:
         combo = QComboBox()
         combo.setEditable(True)
+        combo.addItem("")
         if suggested_field and suggested_field.casefold() not in {name.casefold() for name in field_names}:
-            combo.addItem(f"ADD: {suggested_field}")
-        else:
-            combo.addItem("")
+            combo.addItem(f"ADD TO: {suggested_field}")
         combo.addItems(field_names)
-        combo.activated.connect(lambda _index, source_row=row: self.assign_suggestion(source_row))
+        combo.currentIndexChanged.connect(lambda _index, source_row=row: self.assign_suggestion(source_row))
         if combo.lineEdit() is not None:
-            combo.lineEdit().returnPressed.connect(lambda source_row=row: self.assign_suggestion(source_row))
+            combo.lineEdit().editingFinished.connect(lambda source_row=row: self.assign_suggestion(source_row))
         self.metadata_table.setCellWidget(row, ASSIGN_TO_COLUMN, combo)
 
     def assign_suggestion(self, source_row: int) -> None:
@@ -505,16 +507,39 @@ class MainWindow(QMainWindow):
         if not target_field or not suggested_value:
             return
 
+        previous_assignment = self.suggestion_assignments.get(source_row)
+        if previous_assignment == (target_field, suggested_value):
+            target_row = self._find_current_field_row(target_field)
+            target_value_item = (
+                self.metadata_table.item(target_row, NEW_VALUE_COLUMN)
+                if target_row is not None
+                else None
+            )
+            if target_value_item is not None and target_value_item.text() == suggested_value:
+                return
+
+        if previous_assignment is not None:
+            previous_field, previous_value = previous_assignment
+            if previous_field.casefold() != target_field.casefold():
+                previous_row = self._find_current_field_row(previous_field)
+                if previous_row is not None:
+                    previous_new_item = self.metadata_table.item(previous_row, NEW_VALUE_COLUMN)
+                    if previous_new_item is not None and previous_new_item.text() == previous_value:
+                        self.metadata_table.setItem(previous_row, NEW_VALUE_COLUMN, QTableWidgetItem(""))
+
         target_row = self._find_current_field_row(target_field)
         if target_row is None:
             target_row = self._append_current_field(target_field)
 
         self.metadata_table.setItem(target_row, NEW_VALUE_COLUMN, QTableWidgetItem(suggested_value))
+        self.suggestion_assignments[source_row] = (target_field, suggested_value)
         self.log_message(f"Staged {target_field} from lookup suggestion.")
 
     def _assign_target_field(self, assign_text: str) -> str:
         target_field = assign_text.strip()
-        if target_field.casefold().startswith("add:"):
+        if target_field.casefold().startswith("add to:"):
+            target_field = target_field[7:].strip()
+        elif target_field.casefold().startswith("add:"):
             target_field = target_field[4:].strip()
         return target_field
 
@@ -625,6 +650,7 @@ class MainWindow(QMainWindow):
             combo = self.metadata_table.cellWidget(row, ASSIGN_TO_COLUMN)
             if isinstance(combo, QComboBox):
                 combo.setCurrentText("")
+        self.suggestion_assignments.clear()
 
     def _append_current_field(self, field_name: str) -> int:
         row = self.metadata_table.rowCount()
@@ -652,10 +678,9 @@ class MainWindow(QMainWindow):
             suggested_field = suggested_field_item.text().strip() if suggested_field_item is not None else ""
             combo.blockSignals(True)
             combo.clear()
+            combo.addItem("")
             if suggested_field and suggested_field.casefold() not in {name.casefold() for name in field_names}:
-                combo.addItem(f"ADD: {suggested_field}")
-            else:
-                combo.addItem("")
+                combo.addItem(f"ADD TO: {suggested_field}")
             combo.addItems(field_names)
             combo.setCurrentText(current_text)
             combo.blockSignals(False)
