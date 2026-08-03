@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -38,10 +40,9 @@ WIRED_PROVIDERS = {"mouser"}
 FIELD_COLUMN = 0
 CURRENT_VALUE_COLUMN = 1
 NEW_VALUE_COLUMN = 2
-SEPARATOR_COLUMN = 3
-SUGGESTED_FIELD_COLUMN = 4
-SUGGESTED_VALUE_COLUMN = 5
-ASSIGN_TO_COLUMN = 6
+SUGGESTED_FIELD_COLUMN = 0
+SUGGESTED_VALUE_COLUMN = 1
+ASSIGN_TO_COLUMN = 2
 
 
 class MainWindow(QMainWindow):
@@ -72,6 +73,8 @@ class MainWindow(QMainWindow):
 
         self.provider_combo = QComboBox()
         self._load_providers()
+        self.configure_api_button = QPushButton("Configure APIs")
+        self.configure_api_button.clicked.connect(self.configure_selected_provider)
         self.mpn_edit = QLineEdit()
         self.manufacturer_edit = QLineEdit()
         self.lookup_button = QPushButton("Lookup Metadata")
@@ -80,6 +83,10 @@ class MainWindow(QMainWindow):
         self.manufacturer_edit.returnPressed.connect(self.lookup_metadata)
         self.review_changes_button = QPushButton("Review Changes")
         self.review_changes_button.clicked.connect(self.review_staged_changes)
+        self.assign_selected_button = QPushButton("Assign ->")
+        self.assign_selected_button.clicked.connect(self.assign_selected_suggestion)
+        self.clear_staged_button = QPushButton("Clear Staged")
+        self.clear_staged_button.clicked.connect(self._clear_staging)
         self.result_previous_button = QPushButton("<")
         self.result_previous_button.setToolTip("Previous lookup result")
         self.result_previous_button.clicked.connect(self.previous_lookup_result)
@@ -94,19 +101,19 @@ class MainWindow(QMainWindow):
         self.result_combo.setEnabled(False)
         self.result_combo.currentIndexChanged.connect(self.lookup_result_selected)
 
-        self.metadata_table = QTableWidget(0, 7)
-        self.metadata_table.setHorizontalHeaderLabels(
-            ["Field", "Current Value", "New Value", "", "Suggested Field", "Suggested Value", "Assign To"]
-        )
-        self.metadata_table.horizontalHeader().setSectionResizeMode(FIELD_COLUMN, QHeaderView.ResizeToContents)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(CURRENT_VALUE_COLUMN, QHeaderView.Stretch)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(NEW_VALUE_COLUMN, QHeaderView.Stretch)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(SEPARATOR_COLUMN, QHeaderView.Fixed)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(SUGGESTED_FIELD_COLUMN, QHeaderView.ResizeToContents)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(SUGGESTED_VALUE_COLUMN, QHeaderView.Stretch)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(ASSIGN_TO_COLUMN, QHeaderView.ResizeToContents)
-        self.metadata_table.setColumnWidth(SEPARATOR_COLUMN, 14)
-        self.metadata_table.verticalHeader().setVisible(False)
+        self.current_table = QTableWidget(0, 3)
+        self.current_table.setHorizontalHeaderLabels(["Field", "Current Value", "New Value"])
+        self.current_table.horizontalHeader().setSectionResizeMode(FIELD_COLUMN, QHeaderView.ResizeToContents)
+        self.current_table.horizontalHeader().setSectionResizeMode(CURRENT_VALUE_COLUMN, QHeaderView.Stretch)
+        self.current_table.horizontalHeader().setSectionResizeMode(NEW_VALUE_COLUMN, QHeaderView.Stretch)
+        self.current_table.verticalHeader().setVisible(False)
+
+        self.suggested_table = QTableWidget(0, 3)
+        self.suggested_table.setHorizontalHeaderLabels(["Suggested Field", "Suggested Value", "Assign To"])
+        self.suggested_table.horizontalHeader().setSectionResizeMode(SUGGESTED_FIELD_COLUMN, QHeaderView.ResizeToContents)
+        self.suggested_table.horizontalHeader().setSectionResizeMode(SUGGESTED_VALUE_COLUMN, QHeaderView.Stretch)
+        self.suggested_table.horizontalHeader().setSectionResizeMode(ASSIGN_TO_COLUMN, QHeaderView.ResizeToContents)
+        self.suggested_table.verticalHeader().setVisible(False)
         self._sync_result_navigation()
 
         self.log = QTextEdit()
@@ -130,12 +137,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.source_label)
         layout.addWidget(self.item_label)
 
+        provider_row = QWidget()
+        provider_row_layout = QHBoxLayout(provider_row)
+        provider_row_layout.setContentsMargins(0, 0, 0, 0)
+        provider_row_layout.addWidget(self.provider_combo, stretch=1)
+        provider_row_layout.addWidget(self.configure_api_button)
+
         lookup_form = QFormLayout()
-        lookup_form.addRow("Provider", self.provider_combo)
+        lookup_form.addRow("Provider", provider_row)
         lookup_form.addRow("MPN", self.mpn_edit)
         lookup_form.addRow("Manufacturer", self.manufacturer_edit)
         lookup_form.addRow("", self.lookup_button)
-        lookup_form.addRow("", self.review_changes_button)
         result_nav = QWidget()
         result_nav_layout = QHBoxLayout(result_nav)
         result_nav_layout.setContentsMargins(0, 0, 0, 0)
@@ -148,9 +160,34 @@ class MainWindow(QMainWindow):
         lookup_form.addRow("Result", self.result_combo)
         layout.addLayout(lookup_form)
 
-        layout.addWidget(self.metadata_table, stretch=1)
+        layout.addWidget(self._build_metadata_panes(), stretch=1)
         layout.addWidget(self.log)
         return root
+
+    def _build_metadata_panes(self) -> QSplitter:
+        splitter = QSplitter(Qt.Horizontal)
+
+        current_group = QGroupBox("Current Metadata")
+        current_layout = QVBoxLayout(current_group)
+        current_layout.addWidget(self.current_table)
+
+        action_panel = QWidget()
+        action_layout = QVBoxLayout(action_panel)
+        action_layout.addStretch(1)
+        action_layout.addWidget(self.assign_selected_button)
+        action_layout.addWidget(self.clear_staged_button)
+        action_layout.addWidget(self.review_changes_button)
+        action_layout.addStretch(1)
+
+        suggested_group = QGroupBox("Lookup Suggestions")
+        suggested_layout = QVBoxLayout(suggested_group)
+        suggested_layout.addWidget(self.suggested_table)
+
+        splitter.addWidget(current_group)
+        splitter.addWidget(action_panel)
+        splitter.addWidget(suggested_group)
+        splitter.setSizes([500, 110, 500])
+        return splitter
 
     def open_footprint(self) -> None:
         path_text, _ = QFileDialog.getOpenFileName(
@@ -199,7 +236,8 @@ class MainWindow(QMainWindow):
         self.symbol_combo.blockSignals(False)
         self.source_label.setText(f"Symbol library: {path}")
         self.item_label.setText(f"{len(names)} symbols found. Choose one symbol to inspect.")
-        self.metadata_table.setRowCount(0)
+        self.current_table.setRowCount(0)
+        self.suggested_table.setRowCount(0)
         self.log_message(f"Opened symbol library with {len(names)} symbols: {path.name}")
         if names:
             self.symbol_combo.setCurrentIndex(0)
@@ -289,6 +327,12 @@ class MainWindow(QMainWindow):
         if all(provider_secret(self.private_data, provider_name, field) for field in required_fields):
             return True
         return self._open_provider_config_dialog(provider_name, required_fields)
+
+    def configure_selected_provider(self) -> None:
+        provider_name = str(self.provider_combo.currentData() or "")
+        if not provider_name or provider_name == ALL_CONFIGURED_PROVIDERS:
+            provider_name = "mouser"
+        self._open_provider_config_dialog(provider_name, self._provider_config_fields(provider_name))
 
     def _provider_config_fields(self, provider_name: str) -> list[str]:
         if provider_name == "mouser":
@@ -417,7 +461,7 @@ class MainWindow(QMainWindow):
         self.source_label.setText(f"{item.item_type} source: {item.path}")
         self.item_label.setText(f"{item.item_type}: {item.name}")
         self._seed_lookup_fields(item)
-        self._populate_metadata_table(item)
+        self._populate_metadata_tables(item)
         self.log_message(f"Loaded {item.item_type.lower()}: {item.name}")
         self.statusBar().showMessage(f"Loaded {item.item_type}: {item.name}")
 
@@ -431,59 +475,35 @@ class MainWindow(QMainWindow):
         self.mpn_edit.setText(value)
         self.manufacturer_edit.setText(manufacturer)
 
-    def _populate_metadata_table(self, item: KiCadItem) -> None:
+    def _populate_metadata_tables(self, item: KiCadItem) -> None:
         fields = sorted(item.properties.items(), key=lambda pair: pair[0].casefold())
-        self.metadata_table.setRowCount(len(fields))
+        self.current_table.setRowCount(len(fields))
+        self.suggested_table.setRowCount(0)
+        self.suggestion_assignments.clear()
         for row, (name, value) in enumerate(fields):
             field_item = QTableWidgetItem(name)
             field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
             current_item = QTableWidgetItem(value)
             current_item.setFlags(current_item.flags() & ~Qt.ItemIsEditable)
-            self.metadata_table.setItem(row, FIELD_COLUMN, field_item)
-            self.metadata_table.setItem(row, CURRENT_VALUE_COLUMN, current_item)
-            self.metadata_table.setItem(row, NEW_VALUE_COLUMN, QTableWidgetItem(""))
-            self._set_separator_item(row)
-            self.metadata_table.setItem(row, SUGGESTED_FIELD_COLUMN, QTableWidgetItem(""))
-            self.metadata_table.setItem(row, SUGGESTED_VALUE_COLUMN, QTableWidgetItem(""))
-            self.metadata_table.setItem(row, ASSIGN_TO_COLUMN, QTableWidgetItem(""))
+            self.current_table.setItem(row, FIELD_COLUMN, field_item)
+            self.current_table.setItem(row, CURRENT_VALUE_COLUMN, current_item)
+            self.current_table.setItem(row, NEW_VALUE_COLUMN, QTableWidgetItem(""))
 
     def apply_suggestions(self, part: ProviderPart | None) -> None:
         suggestions = part.fields if part else {}
+        self.suggested_table.setRowCount(0)
         self.suggestion_assignments.clear()
-        for row in range(self.metadata_table.rowCount()):
-            self._set_separator_item(row)
-            self.metadata_table.setItem(row, SUGGESTED_FIELD_COLUMN, QTableWidgetItem(""))
-            self.metadata_table.setItem(row, SUGGESTED_VALUE_COLUMN, QTableWidgetItem(""))
-            self.metadata_table.removeCellWidget(row, ASSIGN_TO_COLUMN)
-            self.metadata_table.setItem(row, ASSIGN_TO_COLUMN, QTableWidgetItem(""))
 
-        start_row = 0
         field_names = self._current_field_names()
-        for suggestion_index, (field, value) in enumerate(suggestions.items()):
-            row = start_row + suggestion_index
-            if row >= self.metadata_table.rowCount():
-                self.metadata_table.insertRow(row)
-                self._ensure_current_cells(row)
-
+        self.suggested_table.setRowCount(len(suggestions))
+        for row, (field, value) in enumerate(suggestions.items()):
             suggestion_field_item = QTableWidgetItem(field)
             suggestion_field_item.setFlags(suggestion_field_item.flags() & ~Qt.ItemIsEditable)
             suggestion_value_item = QTableWidgetItem(value)
             suggestion_value_item.setFlags(suggestion_value_item.flags() & ~Qt.ItemIsEditable)
-            self.metadata_table.setItem(row, SUGGESTED_FIELD_COLUMN, suggestion_field_item)
-            self.metadata_table.setItem(row, SUGGESTED_VALUE_COLUMN, suggestion_value_item)
+            self.suggested_table.setItem(row, SUGGESTED_FIELD_COLUMN, suggestion_field_item)
+            self.suggested_table.setItem(row, SUGGESTED_VALUE_COLUMN, suggestion_value_item)
             self._set_assign_combo(row, field, field_names)
-
-    def _ensure_current_cells(self, row: int) -> None:
-        for column in range(self.metadata_table.columnCount()):
-            if self.metadata_table.item(row, column) is None:
-                self.metadata_table.setItem(row, column, QTableWidgetItem(""))
-        self._set_separator_item(row)
-
-    def _set_separator_item(self, row: int) -> None:
-        separator_item = QTableWidgetItem("")
-        separator_item.setFlags(Qt.NoItemFlags)
-        separator_item.setBackground(Qt.lightGray)
-        self.metadata_table.setItem(row, SEPARATOR_COLUMN, separator_item)
 
     def _set_assign_combo(self, row: int, suggested_field: str, field_names: list[str]) -> None:
         combo = QComboBox()
@@ -495,14 +515,14 @@ class MainWindow(QMainWindow):
         combo.currentIndexChanged.connect(lambda _index, source_row=row: self.assign_suggestion(source_row))
         if combo.lineEdit() is not None:
             combo.lineEdit().editingFinished.connect(lambda source_row=row: self.assign_suggestion(source_row))
-        self.metadata_table.setCellWidget(row, ASSIGN_TO_COLUMN, combo)
+        self.suggested_table.setCellWidget(row, ASSIGN_TO_COLUMN, combo)
 
     def assign_suggestion(self, source_row: int) -> None:
-        combo = self.metadata_table.cellWidget(source_row, ASSIGN_TO_COLUMN)
+        combo = self.suggested_table.cellWidget(source_row, ASSIGN_TO_COLUMN)
         if not isinstance(combo, QComboBox):
             return
         target_field = self._assign_target_field(combo.currentText())
-        suggested_value_item = self.metadata_table.item(source_row, SUGGESTED_VALUE_COLUMN)
+        suggested_value_item = self.suggested_table.item(source_row, SUGGESTED_VALUE_COLUMN)
         suggested_value = suggested_value_item.text() if suggested_value_item is not None else ""
         if not target_field or not suggested_value:
             return
@@ -511,7 +531,7 @@ class MainWindow(QMainWindow):
         if previous_assignment == (target_field, suggested_value):
             target_row = self._find_current_field_row(target_field)
             target_value_item = (
-                self.metadata_table.item(target_row, NEW_VALUE_COLUMN)
+                self.current_table.item(target_row, NEW_VALUE_COLUMN)
                 if target_row is not None
                 else None
             )
@@ -523,17 +543,30 @@ class MainWindow(QMainWindow):
             if previous_field.casefold() != target_field.casefold():
                 previous_row = self._find_current_field_row(previous_field)
                 if previous_row is not None:
-                    previous_new_item = self.metadata_table.item(previous_row, NEW_VALUE_COLUMN)
+                    previous_new_item = self.current_table.item(previous_row, NEW_VALUE_COLUMN)
                     if previous_new_item is not None and previous_new_item.text() == previous_value:
-                        self.metadata_table.setItem(previous_row, NEW_VALUE_COLUMN, QTableWidgetItem(""))
+                        self.current_table.setItem(previous_row, NEW_VALUE_COLUMN, QTableWidgetItem(""))
 
         target_row = self._find_current_field_row(target_field)
         if target_row is None:
             target_row = self._append_current_field(target_field)
 
-        self.metadata_table.setItem(target_row, NEW_VALUE_COLUMN, QTableWidgetItem(suggested_value))
+        self.current_table.setItem(target_row, NEW_VALUE_COLUMN, QTableWidgetItem(suggested_value))
         self.suggestion_assignments[source_row] = (target_field, suggested_value)
         self.log_message(f"Staged {target_field} from lookup suggestion.")
+
+    def assign_selected_suggestion(self) -> None:
+        suggestion_row = self.suggested_table.currentRow()
+        current_row = self.current_table.currentRow()
+        if suggestion_row < 0 or current_row < 0:
+            self._show_error("Selection Needed", "Select one current field and one lookup suggestion.")
+            return
+        field_item = self.current_table.item(current_row, FIELD_COLUMN)
+        combo = self.suggested_table.cellWidget(suggestion_row, ASSIGN_TO_COLUMN)
+        if field_item is None or not isinstance(combo, QComboBox):
+            return
+        combo.setCurrentText(field_item.text())
+        self.assign_suggestion(suggestion_row)
 
     def _assign_target_field(self, assign_text: str) -> str:
         target_field = assign_text.strip()
@@ -600,12 +633,12 @@ class MainWindow(QMainWindow):
 
     def _build_review_rows(self) -> list[dict[str, str]]:
         review_rows: list[dict[str, str]] = []
-        for row in range(self.metadata_table.rowCount()):
-            field_item = self.metadata_table.item(row, FIELD_COLUMN)
+        for row in range(self.current_table.rowCount()):
+            field_item = self.current_table.item(row, FIELD_COLUMN)
             if field_item is None or not field_item.text().strip():
                 continue
-            current_item = self.metadata_table.item(row, CURRENT_VALUE_COLUMN)
-            new_item = self.metadata_table.item(row, NEW_VALUE_COLUMN)
+            current_item = self.current_table.item(row, CURRENT_VALUE_COLUMN)
+            new_item = self.current_table.item(row, NEW_VALUE_COLUMN)
             review_rows.append(
                 {
                     "row": str(row),
@@ -631,7 +664,7 @@ class MainWindow(QMainWindow):
             row = int(review_row["row"])
             current_item = QTableWidgetItem(new_value)
             current_item.setFlags(current_item.flags() & ~Qt.ItemIsEditable)
-            self.metadata_table.setItem(row, CURRENT_VALUE_COLUMN, current_item)
+            self.current_table.setItem(row, CURRENT_VALUE_COLUMN, current_item)
             changed_count += 1
         return changed_count
 
@@ -645,36 +678,33 @@ class MainWindow(QMainWindow):
         return apply_item is not None and apply_item.checkState() == Qt.Checked
 
     def _clear_staging(self) -> None:
-        for row in range(self.metadata_table.rowCount()):
-            self.metadata_table.setItem(row, NEW_VALUE_COLUMN, QTableWidgetItem(""))
-            combo = self.metadata_table.cellWidget(row, ASSIGN_TO_COLUMN)
+        for row in range(self.current_table.rowCount()):
+            self.current_table.setItem(row, NEW_VALUE_COLUMN, QTableWidgetItem(""))
+        for row in range(self.suggested_table.rowCount()):
+            combo = self.suggested_table.cellWidget(row, ASSIGN_TO_COLUMN)
             if isinstance(combo, QComboBox):
                 combo.setCurrentText("")
         self.suggestion_assignments.clear()
 
     def _append_current_field(self, field_name: str) -> int:
-        row = self.metadata_table.rowCount()
-        self.metadata_table.insertRow(row)
+        row = self.current_table.rowCount()
+        self.current_table.insertRow(row)
         field_item = QTableWidgetItem(field_name)
         field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
-        self.metadata_table.setItem(row, FIELD_COLUMN, field_item)
-        self.metadata_table.setItem(row, CURRENT_VALUE_COLUMN, QTableWidgetItem(""))
-        self.metadata_table.setItem(row, NEW_VALUE_COLUMN, QTableWidgetItem(""))
-        self._set_separator_item(row)
-        self.metadata_table.setItem(row, SUGGESTED_FIELD_COLUMN, QTableWidgetItem(""))
-        self.metadata_table.setItem(row, SUGGESTED_VALUE_COLUMN, QTableWidgetItem(""))
-        self.metadata_table.setItem(row, ASSIGN_TO_COLUMN, QTableWidgetItem(""))
+        self.current_table.setItem(row, FIELD_COLUMN, field_item)
+        self.current_table.setItem(row, CURRENT_VALUE_COLUMN, QTableWidgetItem(""))
+        self.current_table.setItem(row, NEW_VALUE_COLUMN, QTableWidgetItem(""))
         self._refresh_assign_combos()
         return row
 
     def _refresh_assign_combos(self) -> None:
         field_names = self._current_field_names()
-        for row in range(self.metadata_table.rowCount()):
-            combo = self.metadata_table.cellWidget(row, ASSIGN_TO_COLUMN)
+        for row in range(self.suggested_table.rowCount()):
+            combo = self.suggested_table.cellWidget(row, ASSIGN_TO_COLUMN)
             if not isinstance(combo, QComboBox):
                 continue
             current_text = combo.currentText()
-            suggested_field_item = self.metadata_table.item(row, SUGGESTED_FIELD_COLUMN)
+            suggested_field_item = self.suggested_table.item(row, SUGGESTED_FIELD_COLUMN)
             suggested_field = suggested_field_item.text().strip() if suggested_field_item is not None else ""
             combo.blockSignals(True)
             combo.clear()
@@ -686,16 +716,16 @@ class MainWindow(QMainWindow):
             combo.blockSignals(False)
 
     def _find_current_field_row(self, field_name: str) -> int | None:
-        for row in range(self.metadata_table.rowCount()):
-            item = self.metadata_table.item(row, FIELD_COLUMN)
+        for row in range(self.current_table.rowCount()):
+            item = self.current_table.item(row, FIELD_COLUMN)
             if item is not None and item.text().casefold() == field_name.casefold():
                 return row
         return None
 
     def _current_field_names(self) -> list[str]:
         names: list[str] = []
-        for row in range(self.metadata_table.rowCount()):
-            item = self.metadata_table.item(row, FIELD_COLUMN)
+        for row in range(self.current_table.rowCount()):
+            item = self.current_table.item(row, FIELD_COLUMN)
             if item is None:
                 continue
             name = item.text().strip()
