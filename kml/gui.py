@@ -63,16 +63,30 @@ class MainWindow(QMainWindow):
         self.manufacturer_edit = QLineEdit()
         self.lookup_button = QPushButton("Lookup Metadata")
         self.lookup_button.clicked.connect(self.lookup_metadata)
+        self.result_previous_button = QPushButton("<")
+        self.result_previous_button.setToolTip("Previous lookup result")
+        self.result_previous_button.clicked.connect(self.previous_lookup_result)
+        self.result_position_edit = QLineEdit("0 / 0")
+        self.result_position_edit.setAlignment(Qt.AlignCenter)
+        self.result_position_edit.setReadOnly(True)
+        self.result_position_edit.setMaximumWidth(90)
+        self.result_next_button = QPushButton(">")
+        self.result_next_button.setToolTip("Next lookup result")
+        self.result_next_button.clicked.connect(self.next_lookup_result)
         self.result_combo = QComboBox()
         self.result_combo.setEnabled(False)
         self.result_combo.currentIndexChanged.connect(self.lookup_result_selected)
 
-        self.metadata_table = QTableWidget(0, 3)
-        self.metadata_table.setHorizontalHeaderLabels(["Field", "Current Value", "Suggested Value"])
+        self.metadata_table = QTableWidget(0, 4)
+        self.metadata_table.setHorizontalHeaderLabels(
+            ["Import", "Field", "Current Value", "Suggested Value"]
+        )
         self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.metadata_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.metadata_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.metadata_table.verticalHeader().setVisible(False)
+        self._sync_result_navigation()
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
@@ -100,6 +114,15 @@ class MainWindow(QMainWindow):
         lookup_form.addRow("MPN", self.mpn_edit)
         lookup_form.addRow("Manufacturer", self.manufacturer_edit)
         lookup_form.addRow("", self.lookup_button)
+        result_nav = QWidget()
+        result_nav_layout = QHBoxLayout(result_nav)
+        result_nav_layout.setContentsMargins(0, 0, 0, 0)
+        result_nav_layout.addStretch(1)
+        result_nav_layout.addWidget(self.result_previous_button)
+        result_nav_layout.addWidget(self.result_position_edit)
+        result_nav_layout.addWidget(self.result_next_button)
+        result_nav_layout.addStretch(1)
+        lookup_form.addRow("Match", result_nav)
         lookup_form.addRow("Result", self.result_combo)
         layout.addLayout(lookup_form)
 
@@ -226,9 +249,11 @@ class MainWindow(QMainWindow):
             label_bits = [bit for bit in [mpn, manufacturer, mouser_part] if bit]
             self.result_combo.addItem(" | ".join(label_bits) or "Unnamed result", part)
         self.result_combo.setEnabled(bool(result.parts))
-        self.result_combo.blockSignals(False)
         if result.parts:
             self.result_combo.setCurrentIndex(0)
+        self.result_combo.blockSignals(False)
+        self._sync_result_navigation()
+        if result.parts:
             self.apply_suggestions(result.parts[0])
         else:
             self.apply_suggestions(None)
@@ -239,6 +264,19 @@ class MainWindow(QMainWindow):
         part = self.result_combo.itemData(index)
         if isinstance(part, ProviderPart):
             self.apply_suggestions(part)
+        self._sync_result_navigation()
+
+    def previous_lookup_result(self) -> None:
+        index = self.result_combo.currentIndex()
+        if index > 0:
+            self.result_combo.setCurrentIndex(index - 1)
+        self._sync_result_navigation()
+
+    def next_lookup_result(self) -> None:
+        index = self.result_combo.currentIndex()
+        if index < self.result_combo.count() - 1:
+            self.result_combo.setCurrentIndex(index + 1)
+        self._sync_result_navigation()
 
     def _set_item(self, item: KiCadItem) -> None:
         self.current_item = item
@@ -247,6 +285,7 @@ class MainWindow(QMainWindow):
         self.result_combo.clear()
         self.result_combo.setEnabled(False)
         self.result_combo.blockSignals(False)
+        self._sync_result_navigation()
         self.source_label.setText(f"{item.item_type} source: {item.path}")
         self.item_label.setText(f"{item.item_type}: {item.name}")
         self._seed_lookup_fields(item)
@@ -268,23 +307,26 @@ class MainWindow(QMainWindow):
         fields = sorted(item.properties.items(), key=lambda pair: pair[0].casefold())
         self.metadata_table.setRowCount(len(fields))
         for row, (name, value) in enumerate(fields):
+            import_item = self._build_import_item(enabled=False, checked=False)
             field_item = QTableWidgetItem(name)
             field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
             current_item = QTableWidgetItem(value)
             suggestion_item = QTableWidgetItem("")
-            self.metadata_table.setItem(row, 0, field_item)
-            self.metadata_table.setItem(row, 1, current_item)
-            self.metadata_table.setItem(row, 2, suggestion_item)
+            self.metadata_table.setItem(row, 0, import_item)
+            self.metadata_table.setItem(row, 1, field_item)
+            self.metadata_table.setItem(row, 2, current_item)
+            self.metadata_table.setItem(row, 3, suggestion_item)
 
     def apply_suggestions(self, part: ProviderPart | None) -> None:
         suggestions = part.fields if part else {}
         for row in range(self.metadata_table.rowCount()):
-            self.metadata_table.setItem(row, 2, QTableWidgetItem(""))
+            self.metadata_table.setItem(row, 0, self._build_import_item(enabled=False, checked=False))
+            self.metadata_table.setItem(row, 3, QTableWidgetItem(""))
 
         existing_fields = {
-            self.metadata_table.item(row, 0).text(): row
+            self.metadata_table.item(row, 1).text(): row
             for row in range(self.metadata_table.rowCount())
-            if self.metadata_table.item(row, 0) is not None
+            if self.metadata_table.item(row, 1) is not None
         }
 
         for field, value in suggestions.items():
@@ -292,20 +334,46 @@ class MainWindow(QMainWindow):
             if row is None:
                 row = self.metadata_table.rowCount()
                 self.metadata_table.insertRow(row)
+                self.metadata_table.setItem(row, 0, self._build_import_item(enabled=False, checked=False))
                 field_item = QTableWidgetItem(field)
                 field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
-                self.metadata_table.setItem(row, 0, field_item)
-                self.metadata_table.setItem(row, 1, QTableWidgetItem(""))
+                self.metadata_table.setItem(row, 1, field_item)
+                self.metadata_table.setItem(row, 2, QTableWidgetItem(""))
                 existing_fields[field] = row
 
             suggestion_item = QTableWidgetItem(value)
             current_value = ""
-            current_item = self.metadata_table.item(row, 1)
+            current_item = self.metadata_table.item(row, 2)
             if current_item is not None:
                 current_value = current_item.text().strip()
             if value and current_value and value != current_value:
                 suggestion_item.setBackground(Qt.yellow)
-            self.metadata_table.setItem(row, 2, suggestion_item)
+            self.metadata_table.setItem(
+                row,
+                0,
+                self._build_import_item(
+                    enabled=bool(value),
+                    checked=bool(value) and value != current_value,
+                ),
+            )
+            self.metadata_table.setItem(row, 3, suggestion_item)
+
+    def _build_import_item(self, enabled: bool, checked: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem("")
+        item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        flags = Qt.ItemIsUserCheckable
+        if enabled:
+            flags |= Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        item.setFlags(flags)
+        return item
+
+    def _sync_result_navigation(self) -> None:
+        count = self.result_combo.count()
+        index = self.result_combo.currentIndex()
+        has_results = count > 0 and index >= 0
+        self.result_position_edit.setText(f"{index + 1} / {count}" if has_results else "0 / 0")
+        self.result_previous_button.setEnabled(has_results and index > 0)
+        self.result_next_button.setEnabled(has_results and index < count - 1)
 
     def _load_providers(self) -> None:
         statuses = provider_statuses(self.private_data)
