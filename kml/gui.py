@@ -7,6 +7,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -23,13 +25,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .config import load_private_data, provider_secret, provider_statuses, update_last_lookup
+from .config import load_private_data, provider_secret, provider_statuses, save_private_data, update_last_lookup
 from .kicad_parser import KiCadItem, load_footprint, load_symbol, load_symbol_names
 from .providers import LookupError, LookupResult, ProviderPart
 from .providers.mouser import lookup_part_number as mouser_lookup_part_number
 
 
 SANDBOX_ROOT = Path(r"C:\Users\phoen\Documents\KiCAD\CUSTOM_LIBRARIES_TEST")
+ALL_CONFIGURED_PROVIDERS = "__all_configured__"
+WIRED_PROVIDERS = {"mouser"}
 
 
 class MainWindow(QMainWindow):
@@ -65,6 +69,8 @@ class MainWindow(QMainWindow):
         self.lookup_button.clicked.connect(self.lookup_metadata)
         self.mpn_edit.returnPressed.connect(self.lookup_metadata)
         self.manufacturer_edit.returnPressed.connect(self.lookup_metadata)
+        self.review_changes_button = QPushButton("Review Changes")
+        self.review_changes_button.clicked.connect(self.review_staged_changes)
         self.result_previous_button = QPushButton("<")
         self.result_previous_button.setToolTip("Previous lookup result")
         self.result_previous_button.clicked.connect(self.previous_lookup_result)
@@ -79,14 +85,16 @@ class MainWindow(QMainWindow):
         self.result_combo.setEnabled(False)
         self.result_combo.currentIndexChanged.connect(self.lookup_result_selected)
 
-        self.metadata_table = QTableWidget(0, 4)
+        self.metadata_table = QTableWidget(0, 6)
         self.metadata_table.setHorizontalHeaderLabels(
-            ["Import", "Field", "Current Value", "Suggested Value"]
+            ["Field", "Current Value", "New Value", "Suggested Field", "Suggested Value", "Assign To"]
         )
         self.metadata_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.metadata_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.metadata_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.metadata_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.metadata_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.metadata_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.metadata_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.metadata_table.verticalHeader().setVisible(False)
         self._sync_result_navigation()
 
@@ -116,6 +124,7 @@ class MainWindow(QMainWindow):
         lookup_form.addRow("MPN", self.mpn_edit)
         lookup_form.addRow("Manufacturer", self.manufacturer_edit)
         lookup_form.addRow("", self.lookup_button)
+        lookup_form.addRow("", self.review_changes_button)
         result_nav = QWidget()
         result_nav_layout = QHBoxLayout(result_nav)
         result_nav_layout.setContentsMargins(0, 0, 0, 0)
@@ -208,6 +217,9 @@ class MainWindow(QMainWindow):
             return
 
         provider_name = str(provider)
+        if provider_name != ALL_CONFIGURED_PROVIDERS and not self._ensure_provider_configured(provider_name):
+            return
+
         self.lookup_button.setEnabled(False)
         self.statusBar().showMessage(f"Looking up {mpn} with {provider_name}...")
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -236,10 +248,112 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"No {provider_name} results for {mpn}.")
 
     def _run_lookup(self, provider: str, mpn: str, manufacturer: str) -> LookupResult:
+        if provider == ALL_CONFIGURED_PROVIDERS:
+            parts: list[ProviderPart] = []
+            skipped: list[str] = []
+            for status in provider_statuses(self.private_data):
+                if not status.configured:
+                    continue
+                if status.name not in WIRED_PROVIDERS:
+                    skipped.append(status.name)
+                    continue
+                provider_result = self._run_lookup(status.name, mpn, manufacturer)
+                parts.extend(provider_result.parts)
+            if skipped:
+                self.log_message(f"Skipped provider(s) not wired yet: {', '.join(skipped)}")
+            if not parts:
+                raise LookupError("No configured provider returned lookup results.")
+            parts.sort(key=lambda part: part.score, reverse=True)
+            return LookupResult(provider="all_configured", query=mpn, parts=parts)
+
         if provider == "mouser":
             api_key = provider_secret(self.private_data, "mouser", "api_key")
             return mouser_lookup_part_number(api_key, mpn, manufacturer)
         raise LookupError(f"Provider is not wired yet: {provider}")
+
+    def _ensure_provider_configured(self, provider_name: str) -> bool:
+        required_fields = self._provider_config_fields(provider_name)
+        if not required_fields:
+            return True
+        if all(provider_secret(self.private_data, provider_name, field) for field in required_fields):
+            return True
+        return self._open_provider_config_dialog(provider_name, required_fields)
+
+    def _provider_config_fields(self, provider_name: str) -> list[str]:
+        if provider_name == "mouser":
+            return ["api_key"]
+        if provider_name in {"digikey", "octopart_nexar"}:
+            return ["client_id", "client_secret"]
+        return ["api_key"]
+
+    def _open_provider_config_dialog(self, provider_name: str, required_fields: list[str]) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Configure {provider_name}")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        edits: dict[str, QLineEdit] = {}
+
+        for field in required_fields:
+            edit = QLineEdit(provider_secret(self.private_data, provider_name, field))
+            edit.setEchoMode(QLineEdit.Password)
+            edit.setMinimumWidth(360)
+            edits[field] = edit
+            form.addRow(field.replace("_", " ").title(), edit)
+
+        test_button = QPushButton("Test")
+        test_button.clicked.connect(
+            lambda: self._test_provider_config(provider_name, {key: edit.text().strip() for key, edit in edits.items()})
+        )
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).clicked.connect(dialog.accept)
+        buttons.button(QDialogButtonBox.Cancel).clicked.connect(dialog.reject)
+
+        layout.addLayout(form)
+        layout.addWidget(test_button)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return False
+
+        self.private_data.setdefault("api_integrations", {})
+        self.private_data["api_integrations"].setdefault("providers", {})
+        provider_settings = self.private_data["api_integrations"]["providers"].setdefault(provider_name, {})
+        provider_settings["enabled"] = True
+        for field, edit in edits.items():
+            provider_settings[field] = edit.text().strip()
+        save_private_data(self.private_data)
+
+        self.private_data = load_private_data()
+        self.provider_combo.clear()
+        self._load_providers()
+        index = self.provider_combo.findData(provider_name)
+        if index >= 0:
+            self.provider_combo.setCurrentIndex(index)
+        return True
+
+    def _test_provider_config(self, provider_name: str, values: dict[str, str]) -> None:
+        mpn = self.mpn_edit.text().strip()
+        manufacturer = self.manufacturer_edit.text().strip()
+        if provider_name != "mouser":
+            QMessageBox.information(
+                self,
+                "Provider Test Not Wired",
+                f"{provider_name} credential storage is available, but test lookup is not wired yet.",
+            )
+            return
+        if not mpn:
+            QMessageBox.warning(self, "Test Needs MPN", "Enter an MPN before testing Mouser credentials.")
+            return
+        try:
+            result = mouser_lookup_part_number(values.get("api_key", ""), mpn, manufacturer)
+        except LookupError as exc:
+            QMessageBox.warning(self, "Mouser Test Failed", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Mouser Test Passed",
+            f"Mouser returned {len(result.parts)} result(s) for {mpn}.",
+        )
 
     def _load_lookup_results(self, result: LookupResult) -> None:
         self.result_combo.blockSignals(True)
@@ -248,7 +362,7 @@ class MainWindow(QMainWindow):
             mpn = part.fields.get("Value", "")
             manufacturer = part.fields.get("MANUFACTURER", "")
             mouser_part = part.fields.get("MouserPartNumber", "")
-            label_bits = [bit for bit in [mpn, manufacturer, mouser_part] if bit]
+            label_bits = [bit for bit in [part.provider, mpn, manufacturer, mouser_part] if bit]
             self.result_combo.addItem(" | ".join(label_bits) or "Unnamed result", part)
         self.result_combo.setEnabled(bool(result.parts))
         if result.parts:
@@ -309,65 +423,210 @@ class MainWindow(QMainWindow):
         fields = sorted(item.properties.items(), key=lambda pair: pair[0].casefold())
         self.metadata_table.setRowCount(len(fields))
         for row, (name, value) in enumerate(fields):
-            import_item = self._build_import_item(enabled=False, checked=False)
             field_item = QTableWidgetItem(name)
             field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
             current_item = QTableWidgetItem(value)
-            suggestion_item = QTableWidgetItem("")
-            self.metadata_table.setItem(row, 0, import_item)
-            self.metadata_table.setItem(row, 1, field_item)
-            self.metadata_table.setItem(row, 2, current_item)
-            self.metadata_table.setItem(row, 3, suggestion_item)
+            current_item.setFlags(current_item.flags() & ~Qt.ItemIsEditable)
+            self.metadata_table.setItem(row, 0, field_item)
+            self.metadata_table.setItem(row, 1, current_item)
+            self.metadata_table.setItem(row, 2, QTableWidgetItem(""))
+            self.metadata_table.setItem(row, 3, QTableWidgetItem(""))
+            self.metadata_table.setItem(row, 4, QTableWidgetItem(""))
+            self.metadata_table.setItem(row, 5, QTableWidgetItem(""))
 
     def apply_suggestions(self, part: ProviderPart | None) -> None:
         suggestions = part.fields if part else {}
         for row in range(self.metadata_table.rowCount()):
-            self.metadata_table.setItem(row, 0, self._build_import_item(enabled=False, checked=False))
             self.metadata_table.setItem(row, 3, QTableWidgetItem(""))
+            self.metadata_table.setItem(row, 4, QTableWidgetItem(""))
+            self.metadata_table.removeCellWidget(row, 5)
+            self.metadata_table.setItem(row, 5, QTableWidgetItem(""))
 
-        existing_fields = {
-            self.metadata_table.item(row, 1).text(): row
-            for row in range(self.metadata_table.rowCount())
-            if self.metadata_table.item(row, 1) is not None
-        }
-
-        for field, value in suggestions.items():
-            row = existing_fields.get(field)
-            if row is None:
-                row = self.metadata_table.rowCount()
+        start_row = 0
+        field_names = self._current_field_names()
+        for suggestion_index, (field, value) in enumerate(suggestions.items()):
+            row = start_row + suggestion_index
+            if row >= self.metadata_table.rowCount():
                 self.metadata_table.insertRow(row)
-                self.metadata_table.setItem(row, 0, self._build_import_item(enabled=False, checked=False))
-                field_item = QTableWidgetItem(field)
-                field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
-                self.metadata_table.setItem(row, 1, field_item)
-                self.metadata_table.setItem(row, 2, QTableWidgetItem(""))
-                existing_fields[field] = row
+                self._ensure_current_cells(row)
 
-            suggestion_item = QTableWidgetItem(value)
-            current_value = ""
-            current_item = self.metadata_table.item(row, 2)
-            if current_item is not None:
-                current_value = current_item.text().strip()
-            if value and current_value and value != current_value:
-                suggestion_item.setBackground(Qt.yellow)
-            self.metadata_table.setItem(
-                row,
-                0,
-                self._build_import_item(
-                    enabled=bool(value),
-                    checked=bool(value) and value != current_value,
-                ),
+            suggestion_field_item = QTableWidgetItem(field)
+            suggestion_field_item.setFlags(suggestion_field_item.flags() & ~Qt.ItemIsEditable)
+            suggestion_value_item = QTableWidgetItem(value)
+            suggestion_value_item.setFlags(suggestion_value_item.flags() & ~Qt.ItemIsEditable)
+            self.metadata_table.setItem(row, 3, suggestion_field_item)
+            self.metadata_table.setItem(row, 4, suggestion_value_item)
+            self._set_assign_combo(row, field_names)
+
+    def _ensure_current_cells(self, row: int) -> None:
+        for column in range(self.metadata_table.columnCount()):
+            if self.metadata_table.item(row, column) is None:
+                self.metadata_table.setItem(row, column, QTableWidgetItem(""))
+
+    def _set_assign_combo(self, row: int, field_names: list[str]) -> None:
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItem("")
+        combo.addItems(field_names)
+        combo.activated.connect(lambda _index, source_row=row: self.assign_suggestion(source_row))
+        if combo.lineEdit() is not None:
+            combo.lineEdit().returnPressed.connect(lambda source_row=row: self.assign_suggestion(source_row))
+        self.metadata_table.setCellWidget(row, 5, combo)
+
+    def assign_suggestion(self, source_row: int) -> None:
+        combo = self.metadata_table.cellWidget(source_row, 5)
+        if not isinstance(combo, QComboBox):
+            return
+        target_field = combo.currentText().strip()
+        suggested_value_item = self.metadata_table.item(source_row, 4)
+        suggested_value = suggested_value_item.text() if suggested_value_item is not None else ""
+        if not target_field or not suggested_value:
+            return
+
+        target_row = self._find_current_field_row(target_field)
+        if target_row is None:
+            target_row = self._append_current_field(target_field)
+
+        self.metadata_table.setItem(target_row, 2, QTableWidgetItem(suggested_value))
+        self.log_message(f"Staged {target_field} from lookup suggestion.")
+
+    def review_staged_changes(self) -> None:
+        review_rows = self._build_review_rows()
+        if not review_rows:
+            self._show_error("No Fields Loaded", "Open a footprint or symbol before reviewing changes.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review Metadata Changes")
+        dialog.resize(840, 460)
+
+        layout = QVBoxLayout(dialog)
+        table = QTableWidget(len(review_rows), 4)
+        table.setHorizontalHeaderLabels(["Apply", "Field", "Current Value", "New Value"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        table.verticalHeader().setVisible(False)
+
+        for row, review_row in enumerate(review_rows):
+            apply_item = QTableWidgetItem("")
+            apply_item.setCheckState(Qt.Checked if review_row["new_value"] else Qt.Unchecked)
+            apply_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+            field_item = QTableWidgetItem(review_row["field"])
+            field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
+            current_item = QTableWidgetItem(review_row["current_value"])
+            current_item.setFlags(current_item.flags() & ~Qt.ItemIsEditable)
+            new_item = QTableWidgetItem(review_row["new_value"] or "no change")
+            new_item.setFlags(new_item.flags() & ~Qt.ItemIsEditable)
+            table.setItem(row, 0, apply_item)
+            table.setItem(row, 1, field_item)
+            table.setItem(row, 2, current_item)
+            table.setItem(row, 3, new_item)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Apply).clicked.connect(dialog.accept)
+        buttons.button(QDialogButtonBox.Cancel).clicked.connect(dialog.reject)
+
+        layout.addWidget(table)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        changed_count = self._apply_reviewed_changes(review_rows, table)
+        self._clear_staging()
+        self.log_message(f"Applied {changed_count} visible metadata change(s).")
+        self.statusBar().showMessage(f"Applied {changed_count} visible metadata change(s).")
+
+    def _build_review_rows(self) -> list[dict[str, str]]:
+        review_rows: list[dict[str, str]] = []
+        for row in range(self.metadata_table.rowCount()):
+            field_item = self.metadata_table.item(row, 0)
+            if field_item is None or not field_item.text().strip():
+                continue
+            current_item = self.metadata_table.item(row, 1)
+            new_item = self.metadata_table.item(row, 2)
+            review_rows.append(
+                {
+                    "row": str(row),
+                    "field": field_item.text().strip(),
+                    "current_value": current_item.text() if current_item is not None else "",
+                    "new_value": new_item.text() if new_item is not None else "",
+                }
             )
-            self.metadata_table.setItem(row, 3, suggestion_item)
+        return review_rows
 
-    def _build_import_item(self, enabled: bool, checked: bool) -> QTableWidgetItem:
-        item = QTableWidgetItem("")
-        item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-        flags = Qt.ItemIsUserCheckable
-        if enabled:
-            flags |= Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        item.setFlags(flags)
-        return item
+    def _apply_reviewed_changes(
+        self,
+        review_rows: list[dict[str, str]],
+        review_table: QTableWidget,
+    ) -> int:
+        changed_count = 0
+        for review_index, review_row in enumerate(review_rows):
+            apply_item = review_table.item(review_index, 0)
+            if apply_item is None or apply_item.checkState() != Qt.Checked:
+                continue
+            new_value = review_row["new_value"]
+            if not new_value:
+                continue
+            row = int(review_row["row"])
+            self.metadata_table.setItem(row, 1, QTableWidgetItem(new_value))
+            changed_count += 1
+        return changed_count
+
+    def _clear_staging(self) -> None:
+        for row in range(self.metadata_table.rowCount()):
+            self.metadata_table.setItem(row, 2, QTableWidgetItem(""))
+            combo = self.metadata_table.cellWidget(row, 5)
+            if isinstance(combo, QComboBox):
+                combo.setCurrentText("")
+
+    def _append_current_field(self, field_name: str) -> int:
+        row = self.metadata_table.rowCount()
+        self.metadata_table.insertRow(row)
+        field_item = QTableWidgetItem(field_name)
+        field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
+        self.metadata_table.setItem(row, 0, field_item)
+        self.metadata_table.setItem(row, 1, QTableWidgetItem(""))
+        self.metadata_table.setItem(row, 2, QTableWidgetItem(""))
+        self.metadata_table.setItem(row, 3, QTableWidgetItem(""))
+        self.metadata_table.setItem(row, 4, QTableWidgetItem(""))
+        self.metadata_table.setItem(row, 5, QTableWidgetItem(""))
+        self._refresh_assign_combos()
+        return row
+
+    def _refresh_assign_combos(self) -> None:
+        field_names = self._current_field_names()
+        for row in range(self.metadata_table.rowCount()):
+            combo = self.metadata_table.cellWidget(row, 5)
+            if not isinstance(combo, QComboBox):
+                continue
+            current_text = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("")
+            combo.addItems(field_names)
+            combo.setCurrentText(current_text)
+            combo.blockSignals(False)
+
+    def _find_current_field_row(self, field_name: str) -> int | None:
+        for row in range(self.metadata_table.rowCount()):
+            item = self.metadata_table.item(row, 0)
+            if item is not None and item.text().casefold() == field_name.casefold():
+                return row
+        return None
+
+    def _current_field_names(self) -> list[str]:
+        names: list[str] = []
+        for row in range(self.metadata_table.rowCount()):
+            item = self.metadata_table.item(row, 0)
+            if item is None:
+                continue
+            name = item.text().strip()
+            if name:
+                names.append(name)
+        return names
 
     def _sync_result_navigation(self) -> None:
         count = self.result_combo.count()
@@ -378,6 +637,7 @@ class MainWindow(QMainWindow):
         self.result_next_button.setEnabled(has_results and index < count - 1)
 
     def _load_providers(self) -> None:
+        self.provider_combo.addItem("All configured APIs", ALL_CONFIGURED_PROVIDERS)
         statuses = provider_statuses(self.private_data)
         for status in statuses:
             label = status.name
