@@ -63,6 +63,8 @@ class MainWindow(QMainWindow):
         self.manufacturer_edit = QLineEdit()
         self.lookup_button = QPushButton("Lookup Metadata")
         self.lookup_button.clicked.connect(self.lookup_metadata)
+        self.mpn_edit.returnPressed.connect(self.lookup_metadata)
+        self.manufacturer_edit.returnPressed.connect(self.lookup_metadata)
         self.result_previous_button = QPushButton("<")
         self.result_previous_button.setToolTip("Previous lookup result")
         self.result_previous_button.clicked.connect(self.previous_lookup_result)
