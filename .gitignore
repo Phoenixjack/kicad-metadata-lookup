@@ -4,6 +4,7 @@ __pycache__/
 
 # Local private config. Do not commit API keys.
 kml_private_data.json
+*.kml_backup_*
 
 # Build/package output.
 build/

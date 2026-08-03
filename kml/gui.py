@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sys
+import webbrowser
 from pathlib import Path
+from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from .config import load_private_data, provider_secret, provider_statuses, save_private_data, update_last_lookup
 from .kicad_parser import KiCadItem, load_footprint, load_symbol, load_symbol_names
+from .kicad_writer import MetadataSaveError, save_metadata_changes
 from .providers import LookupError, LookupResult, ProviderPart
 from .providers.mouser import lookup_part_number as mouser_lookup_part_number
 
@@ -83,7 +86,7 @@ class MainWindow(QMainWindow):
         self.manufacturer_edit.returnPressed.connect(self.lookup_metadata)
         self.review_changes_button = QPushButton("Review Changes")
         self.review_changes_button.clicked.connect(self.review_staged_changes)
-        self.assign_selected_button = QPushButton("Assign ->")
+        self.assign_selected_button = QPushButton("<- Assign")
         self.assign_selected_button.clicked.connect(self.assign_selected_suggestion)
         self.clear_staged_button = QPushButton("Clear Staged")
         self.clear_staged_button.clicked.connect(self._clear_staging)
@@ -107,6 +110,7 @@ class MainWindow(QMainWindow):
         self.current_table.horizontalHeader().setSectionResizeMode(CURRENT_VALUE_COLUMN, QHeaderView.Stretch)
         self.current_table.horizontalHeader().setSectionResizeMode(NEW_VALUE_COLUMN, QHeaderView.Stretch)
         self.current_table.verticalHeader().setVisible(False)
+        self.current_table.cellDoubleClicked.connect(self._open_current_table_url)
 
         self.suggested_table = QTableWidget(0, 3)
         self.suggested_table.setHorizontalHeaderLabels(["Suggested Field", "Suggested Value", "Assign To"])
@@ -114,6 +118,7 @@ class MainWindow(QMainWindow):
         self.suggested_table.horizontalHeader().setSectionResizeMode(SUGGESTED_VALUE_COLUMN, QHeaderView.Stretch)
         self.suggested_table.horizontalHeader().setSectionResizeMode(ASSIGN_TO_COLUMN, QHeaderView.ResizeToContents)
         self.suggested_table.verticalHeader().setVisible(False)
+        self.suggested_table.cellDoubleClicked.connect(self._open_suggested_table_url)
         self._sync_result_navigation()
 
         self.log = QTextEdit()
@@ -355,7 +360,7 @@ class MainWindow(QMainWindow):
             edits[field] = edit
             form.addRow(field.replace("_", " ").title(), edit)
 
-        test_button = QPushButton("Test")
+        test_button = QPushButton("Test Credentials")
         test_button.clicked.connect(
             lambda: self._test_provider_config(provider_name, {key: edit.text().strip() for key, edit in edits.items()})
         )
@@ -389,6 +394,11 @@ class MainWindow(QMainWindow):
     def _test_provider_config(self, provider_name: str, values: dict[str, str]) -> None:
         mpn = self.mpn_edit.text().strip()
         manufacturer = self.manufacturer_edit.text().strip()
+        missing_fields = [field for field, value in values.items() if not value.strip()]
+        if missing_fields:
+            missing = ", ".join(field.replace("_", " ").title() for field in missing_fields)
+            QMessageBox.warning(self, "Test Needs Credentials", f"Enter {missing} before testing {provider_name}.")
+            return
         if provider_name != "mouser":
             QMessageBox.information(
                 self,
@@ -626,10 +636,29 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
 
-        changed_count = self._apply_reviewed_changes(review_rows, table)
+        changes = self._reviewed_changes(review_rows, table)
+        if not changes:
+            self._show_error("No Changes Selected", "Select at least one staged value to apply.")
+            return
+        if self.current_item is None:
+            self._show_error("No Item Loaded", "Open a footprint or symbol before applying changes.")
+            return
+        if not self._confirm_save_target(self.current_item.path):
+            return
+
+        try:
+            save_result = save_metadata_changes(self.current_item, changes)
+        except (MetadataSaveError, OSError) as exc:
+            self._show_error("Save Failed", str(exc))
+            return
+
+        changed_count = self._apply_saved_changes(changes, set(save_result.changed_fields))
         self._clear_staging()
-        self.log_message(f"Applied {changed_count} visible metadata change(s).")
-        self.statusBar().showMessage(f"Applied {changed_count} visible metadata change(s).")
+        self.log_message(
+            f"Saved {changed_count} metadata change(s) to {save_result.path.name}. "
+            f"Backup: {save_result.backup_path.name}"
+        )
+        self.statusBar().showMessage(f"Saved {changed_count} metadata change(s).")
 
     def _build_review_rows(self) -> list[dict[str, str]]:
         review_rows: list[dict[str, str]] = []
@@ -649,22 +678,37 @@ class MainWindow(QMainWindow):
             )
         return review_rows
 
-    def _apply_reviewed_changes(
+    def _reviewed_changes(
         self,
         review_rows: list[dict[str, str]],
         review_table: QTableWidget,
-    ) -> int:
-        changed_count = 0
+    ) -> dict[str, str]:
+        changes: dict[str, str] = {}
         for review_index, review_row in enumerate(review_rows):
             if not self._review_row_is_checked(review_table, review_index):
                 continue
             new_value = review_row["new_value"]
             if not new_value:
                 continue
-            row = int(review_row["row"])
+            changes[review_row["field"]] = new_value
+        return changes
+
+    def _apply_saved_changes(self, changes: dict[str, str], saved_fields: set[str]) -> int:
+        changed_count = 0
+        saved_field_keys = {field.casefold() for field in saved_fields}
+        for field, new_value in changes.items():
+            if field.casefold() not in saved_field_keys:
+                continue
+            row = self._find_current_field_row(field)
+            if row is None:
+                continue
             current_item = QTableWidgetItem(new_value)
             current_item.setFlags(current_item.flags() & ~Qt.ItemIsEditable)
             self.current_table.setItem(row, CURRENT_VALUE_COLUMN, current_item)
+            if self.current_item is not None:
+                self.current_item.properties[field] = new_value
+                if field in self.current_item.summary:
+                    self.current_item.summary[field] = new_value
             changed_count += 1
         return changed_count
 
@@ -763,12 +807,67 @@ class MainWindow(QMainWindow):
     def _dialog_root(self) -> Path:
         return SANDBOX_ROOT if SANDBOX_ROOT.exists() else Path.home()
 
+    def _open_current_table_url(self, row: int, column: int) -> None:
+        if column == FIELD_COLUMN:
+            return
+        item = self.current_table.item(row, column)
+        self._open_url_from_item(item)
+
+    def _open_suggested_table_url(self, row: int, column: int) -> None:
+        if column == ASSIGN_TO_COLUMN:
+            return
+        item = self.suggested_table.item(row, column)
+        self._open_url_from_item(item)
+
+    def _open_url_from_item(self, item: QTableWidgetItem | None) -> None:
+        if item is None:
+            return
+        url = item.text().strip()
+        if not _is_url(url):
+            return
+        answer = QMessageBox.question(
+            self,
+            "Open URL?",
+            f"Open this URL in your default browser?\n\n{url}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        webbrowser.open(url)
+        self.log_message(f"Opened URL: {url}")
+
+    def _confirm_save_target(self, path: Path) -> bool:
+        if _path_is_under(path, SANDBOX_ROOT):
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Save Outside Sandbox?",
+            f"This will update the KiCad file outside the sandbox:\n\n{path}\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
     def log_message(self, message: str) -> None:
         self.log.append(message)
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.warning(self, title, message)
         self.statusBar().showMessage(message)
+
+
+def _is_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def main() -> int:
