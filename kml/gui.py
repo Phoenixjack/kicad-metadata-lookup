@@ -23,8 +23,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .config import load_private_data, provider_statuses, update_last_lookup
+from .config import load_private_data, provider_secret, provider_statuses, update_last_lookup
 from .kicad_parser import KiCadItem, load_footprint, load_symbol, load_symbol_names
+from .providers import LookupError, LookupResult, ProviderPart
+from .providers.mouser import lookup_part_number as mouser_lookup_part_number
 
 
 SANDBOX_ROOT = Path(r"C:\Users\phoen\Documents\KiCAD\CUSTOM_LIBRARIES_TEST")
@@ -38,6 +40,7 @@ class MainWindow(QMainWindow):
 
         self.current_item: KiCadItem | None = None
         self.current_symbol_library: Path | None = None
+        self.current_lookup_result: LookupResult | None = None
         self.private_data = load_private_data()
 
         self.source_label = QLabel("No KiCad item loaded.")
@@ -60,6 +63,9 @@ class MainWindow(QMainWindow):
         self.manufacturer_edit = QLineEdit()
         self.lookup_button = QPushButton("Lookup Metadata")
         self.lookup_button.clicked.connect(self.lookup_metadata)
+        self.result_combo = QComboBox()
+        self.result_combo.setEnabled(False)
+        self.result_combo.currentIndexChanged.connect(self.lookup_result_selected)
 
         self.metadata_table = QTableWidget(0, 3)
         self.metadata_table.setHorizontalHeaderLabels(["Field", "Current Value", "Suggested Value"])
@@ -94,6 +100,7 @@ class MainWindow(QMainWindow):
         lookup_form.addRow("MPN", self.mpn_edit)
         lookup_form.addRow("Manufacturer", self.manufacturer_edit)
         lookup_form.addRow("", self.lookup_button)
+        lookup_form.addRow("Result", self.result_combo)
         layout.addLayout(lookup_form)
 
         layout.addWidget(self.metadata_table, stretch=1)
@@ -175,15 +182,71 @@ class MainWindow(QMainWindow):
             self._show_error("Lookup Needs MPN", "Enter or load a manufacturer part number before lookup.")
             return
 
-        update_last_lookup(mpn, manufacturer, str(provider))
-        self.log_message(
-            "Lookup UI is wired to the selected item and private config. "
-            "Provider API calls and field suggestions are the next milestone."
-        )
-        self.statusBar().showMessage(f"Ready for {provider} lookup: {mpn}")
+        provider_name = str(provider)
+        self.lookup_button.setEnabled(False)
+        self.statusBar().showMessage(f"Looking up {mpn} with {provider_name}...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        error_message = ""
+        try:
+            result = self._run_lookup(provider_name, mpn, manufacturer)
+        except LookupError as exc:
+            error_message = str(exc)
+            result = None
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.lookup_button.setEnabled(True)
+
+        if error_message or result is None:
+            self._show_error("Lookup Failed", error_message or "Lookup did not return a result.")
+            return
+
+        update_last_lookup(mpn, manufacturer, provider_name)
+        self.current_lookup_result = result
+        self._load_lookup_results(result)
+        if result.parts:
+            self.log_message(f"{provider_name} returned {len(result.parts)} result(s) for {mpn}.")
+            self.statusBar().showMessage(f"{provider_name} returned {len(result.parts)} result(s).")
+        else:
+            self.log_message(f"{provider_name} returned no results for {mpn}.")
+            self.statusBar().showMessage(f"No {provider_name} results for {mpn}.")
+
+    def _run_lookup(self, provider: str, mpn: str, manufacturer: str) -> LookupResult:
+        if provider == "mouser":
+            api_key = provider_secret(self.private_data, "mouser", "api_key")
+            return mouser_lookup_part_number(api_key, mpn, manufacturer)
+        raise LookupError(f"Provider is not wired yet: {provider}")
+
+    def _load_lookup_results(self, result: LookupResult) -> None:
+        self.result_combo.blockSignals(True)
+        self.result_combo.clear()
+        for part in result.parts:
+            mpn = part.fields.get("Value", "")
+            manufacturer = part.fields.get("MANUFACTURER", "")
+            mouser_part = part.fields.get("MouserPartNumber", "")
+            label_bits = [bit for bit in [mpn, manufacturer, mouser_part] if bit]
+            self.result_combo.addItem(" | ".join(label_bits) or "Unnamed result", part)
+        self.result_combo.setEnabled(bool(result.parts))
+        self.result_combo.blockSignals(False)
+        if result.parts:
+            self.result_combo.setCurrentIndex(0)
+            self.apply_suggestions(result.parts[0])
+        else:
+            self.apply_suggestions(None)
+
+    def lookup_result_selected(self, index: int) -> None:
+        if index < 0:
+            return
+        part = self.result_combo.itemData(index)
+        if isinstance(part, ProviderPart):
+            self.apply_suggestions(part)
 
     def _set_item(self, item: KiCadItem) -> None:
         self.current_item = item
+        self.current_lookup_result = None
+        self.result_combo.blockSignals(True)
+        self.result_combo.clear()
+        self.result_combo.setEnabled(False)
+        self.result_combo.blockSignals(False)
         self.source_label.setText(f"{item.item_type} source: {item.path}")
         self.item_label.setText(f"{item.item_type}: {item.name}")
         self._seed_lookup_fields(item)
@@ -211,6 +274,37 @@ class MainWindow(QMainWindow):
             suggestion_item = QTableWidgetItem("")
             self.metadata_table.setItem(row, 0, field_item)
             self.metadata_table.setItem(row, 1, current_item)
+            self.metadata_table.setItem(row, 2, suggestion_item)
+
+    def apply_suggestions(self, part: ProviderPart | None) -> None:
+        suggestions = part.fields if part else {}
+        for row in range(self.metadata_table.rowCount()):
+            self.metadata_table.setItem(row, 2, QTableWidgetItem(""))
+
+        existing_fields = {
+            self.metadata_table.item(row, 0).text(): row
+            for row in range(self.metadata_table.rowCount())
+            if self.metadata_table.item(row, 0) is not None
+        }
+
+        for field, value in suggestions.items():
+            row = existing_fields.get(field)
+            if row is None:
+                row = self.metadata_table.rowCount()
+                self.metadata_table.insertRow(row)
+                field_item = QTableWidgetItem(field)
+                field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
+                self.metadata_table.setItem(row, 0, field_item)
+                self.metadata_table.setItem(row, 1, QTableWidgetItem(""))
+                existing_fields[field] = row
+
+            suggestion_item = QTableWidgetItem(value)
+            current_value = ""
+            current_item = self.metadata_table.item(row, 1)
+            if current_item is not None:
+                current_value = current_item.text().strip()
+            if value and current_value and value != current_value:
+                suggestion_item.setBackground(Qt.yellow)
             self.metadata_table.setItem(row, 2, suggestion_item)
 
     def _load_providers(self) -> None:

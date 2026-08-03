@@ -87,6 +87,28 @@ def provider_statuses(private_data: dict[str, Any]) -> list[ProviderStatus]:
     return [statuses_by_name[name] for name in sorted(statuses_by_name)]
 
 
+def provider_secret(private_data: dict[str, Any], provider_name: str, key_name: str) -> str:
+    api_integrations = private_data.get("api_integrations", {})
+    if not isinstance(api_integrations, dict):
+        return ""
+
+    providers = api_integrations.get("providers", {})
+    if isinstance(providers, dict):
+        provider_settings = providers.get(provider_name, {})
+        if isinstance(provider_settings, dict):
+            value = provider_settings.get(key_name, "")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    legacy_keys = api_integrations.get("keys", {})
+    if key_name == "api_key" and isinstance(legacy_keys, dict):
+        value = legacy_keys.get(provider_name, "")
+        if isinstance(value, str):
+            return value.strip()
+
+    return ""
+
+
 def update_last_lookup(mpn: str, manufacturer: str, provider: str) -> None:
     private_data = load_private_data()
     updated = copy.deepcopy(private_data)

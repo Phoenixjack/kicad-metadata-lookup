@@ -26,8 +26,8 @@ Avoid the blank command prompt by launching the GUI with `pythonw.exe` or a `.py
 ## Milestone 3 - Manual Lookup Workflow
 
 - Accept a manufacturer part number and optional manufacturer name.
-- Let the user choose which configured provider to query.
-- Show raw normalized results in a preview table.
+- Let the user choose which configured provider to query. (Initial Mouser lookup wired.)
+- Show normalized results in a preview table.
 - Do not write to KiCad files yet.
 - Add clear empty, missing-key, provider-error, and rate-limit states.
 

@@ -15,5 +15,5 @@ python -m pip install -r requirements.txt
 Launch without a command prompt:
 
 ```powershell
-pythonw kml_app.pyw
+.\.venv\Scripts\pythonw.exe kml_app.pyw
 ```
