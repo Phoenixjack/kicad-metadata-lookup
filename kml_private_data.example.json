@@ -1,0 +1,29 @@
+{
+  "config_schema_version": 1,
+  "api_integrations": {
+    "providers": {
+      "mouser": {
+        "enabled": false,
+        "api_key": ""
+      },
+      "digikey": {
+        "enabled": false,
+        "client_id": "",
+        "client_secret": ""
+      },
+      "octopart_nexar": {
+        "enabled": false,
+        "client_id": "",
+        "client_secret": ""
+      }
+    }
+  },
+  "gui": {
+    "window_geometry": "",
+    "last_provider": "mouser"
+  },
+  "lookup": {
+    "last_mpn": "",
+    "last_manufacturer": ""
+  }
+}
