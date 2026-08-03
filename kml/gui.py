@@ -34,12 +34,25 @@ from .config import load_private_data, provider_secret, provider_statuses, save_
 from .kicad_parser import KiCadItem, load_footprint, load_symbol, load_symbol_names
 from .kicad_writer import MetadataSaveError, save_metadata_changes
 from .providers import LookupError, LookupResult, ProviderPart
+from .providers.digikey import lookup_part_number as digikey_lookup_part_number
+from .providers.digikey import test_credentials as digikey_test_credentials
 from .providers.mouser import lookup_part_number as mouser_lookup_part_number
 
 
 SANDBOX_ROOT = Path(r"C:\Users\phoen\Documents\KiCAD\CUSTOM_LIBRARIES_TEST")
 ALL_CONFIGURED_PROVIDERS = "__all_configured__"
-WIRED_PROVIDERS = {"mouser"}
+WIRED_PROVIDERS = {"digikey", "mouser"}
+PROVIDER_LABELS = {
+    "digikey": "DigiKey",
+    "mouser": "Mouser",
+    "octopart_nexar": "Octopart Nexar",
+}
+FIELD_LABELS = {
+    "api_key": "API Key",
+    "client_id": "Client ID",
+    "client_secret": "Client Secret / Password",
+}
+DEFAULT_TEST_QUERY = "KML-CREDENTIAL-TEST-NO-RESULTS"
 FIELD_COLUMN = 0
 CURRENT_VALUE_COLUMN = 1
 NEW_VALUE_COLUMN = 2
@@ -323,6 +336,10 @@ class MainWindow(QMainWindow):
         if provider == "mouser":
             api_key = provider_secret(self.private_data, "mouser", "api_key")
             return mouser_lookup_part_number(api_key, mpn, manufacturer)
+        if provider == "digikey":
+            client_id = provider_secret(self.private_data, "digikey", "client_id")
+            client_secret = provider_secret(self.private_data, "digikey", "client_secret")
+            return digikey_lookup_part_number(client_id, client_secret, mpn, manufacturer)
         raise LookupError(f"Provider is not wired yet: {provider}")
 
     def _ensure_provider_configured(self, provider_name: str) -> bool:
@@ -348,7 +365,8 @@ class MainWindow(QMainWindow):
 
     def _open_provider_config_dialog(self, provider_name: str, required_fields: list[str]) -> bool:
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Configure {provider_name}")
+        provider_label = PROVIDER_LABELS.get(provider_name, provider_name)
+        dialog.setWindowTitle(f"Configure {provider_label}")
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
         edits: dict[str, QLineEdit] = {}
@@ -358,7 +376,7 @@ class MainWindow(QMainWindow):
             edit.setEchoMode(QLineEdit.Password)
             edit.setMinimumWidth(360)
             edits[field] = edit
-            form.addRow(field.replace("_", " ").title(), edit)
+            form.addRow(FIELD_LABELS.get(field, field.replace("_", " ").title()), edit)
 
         test_button = QPushButton("Test Credentials")
         test_button.clicked.connect(
@@ -392,43 +410,57 @@ class MainWindow(QMainWindow):
         return True
 
     def _test_provider_config(self, provider_name: str, values: dict[str, str]) -> None:
-        mpn = self.mpn_edit.text().strip()
+        mpn = self.mpn_edit.text().strip() or DEFAULT_TEST_QUERY
         manufacturer = self.manufacturer_edit.text().strip()
         missing_fields = [field for field, value in values.items() if not value.strip()]
         if missing_fields:
             missing = ", ".join(field.replace("_", " ").title() for field in missing_fields)
             QMessageBox.warning(self, "Test Needs Credentials", f"Enter {missing} before testing {provider_name}.")
             return
-        if provider_name != "mouser":
-            QMessageBox.information(
-                self,
-                "Provider Test Not Wired",
-                f"{provider_name} credential storage is available, but test lookup is not wired yet.",
-            )
-            return
-        if not mpn:
-            QMessageBox.warning(self, "Test Needs MPN", "Enter an MPN before testing Mouser credentials.")
-            return
+        provider_label = PROVIDER_LABELS.get(provider_name, provider_name)
         try:
-            result = mouser_lookup_part_number(values.get("api_key", ""), mpn, manufacturer)
+            if provider_name == "mouser":
+                result = mouser_lookup_part_number(values.get("api_key", ""), mpn, manufacturer)
+            elif provider_name == "digikey":
+                result = digikey_test_credentials(
+                    values.get("client_id", ""),
+                    values.get("client_secret", ""),
+                    mpn,
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Provider Test Not Wired",
+                    f"{provider_label} credential storage is available, but test lookup is not wired yet.",
+                )
+                return
         except LookupError as exc:
-            QMessageBox.warning(self, "Mouser Test Failed", str(exc))
+            QMessageBox.warning(self, f"{provider_label} Test Failed", str(exc))
             return
         QMessageBox.information(
             self,
-            "Mouser Test Passed",
-            f"Mouser returned {len(result.parts)} result(s) for {mpn}.",
+            f"{provider_label} Test Passed",
+            f"{provider_label} accepted the credentials and returned {len(result.parts)} result(s) for {mpn}.",
         )
+
+    def _provider_label(self, provider_name: str) -> str:
+        return PROVIDER_LABELS.get(provider_name, provider_name)
+
+    def _lookup_result_label(self, part: ProviderPart) -> str:
+        mpn = part.fields.get("Value", "")
+        manufacturer = part.fields.get("MANUFACTURER", "")
+        provider_part = part.fields.get("MouserPartNumber", "") or part.fields.get("DigiKeyPartNumber", "")
+        label_bits = [bit for bit in [self._provider_label(part.provider), mpn, manufacturer, provider_part] if bit]
+        return " | ".join(label_bits) or "Unnamed result"
+
+    def _provider_status_label(self, name: str) -> str:
+        return PROVIDER_LABELS.get(name, name)
 
     def _load_lookup_results(self, result: LookupResult) -> None:
         self.result_combo.blockSignals(True)
         self.result_combo.clear()
         for part in result.parts:
-            mpn = part.fields.get("Value", "")
-            manufacturer = part.fields.get("MANUFACTURER", "")
-            mouser_part = part.fields.get("MouserPartNumber", "")
-            label_bits = [bit for bit in [part.provider, mpn, manufacturer, mouser_part] if bit]
-            self.result_combo.addItem(" | ".join(label_bits) or "Unnamed result", part)
+            self.result_combo.addItem(self._lookup_result_label(part), part)
         self.result_combo.setEnabled(bool(result.parts))
         if result.parts:
             self.result_combo.setCurrentIndex(0)
@@ -789,7 +821,7 @@ class MainWindow(QMainWindow):
         self.provider_combo.addItem("All configured APIs", ALL_CONFIGURED_PROVIDERS)
         statuses = provider_statuses(self.private_data)
         for status in statuses:
-            label = status.name
+            label = self._provider_status_label(status.name)
             if status.enabled and status.configured:
                 label += " (configured)"
             elif status.configured:
