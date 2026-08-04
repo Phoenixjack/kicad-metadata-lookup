@@ -37,6 +37,7 @@ from .providers import LookupError, LookupResult, ProviderPart
 from .providers.digikey import lookup_part_number as digikey_lookup_part_number
 from .providers.digikey import test_credentials as digikey_test_credentials
 from .providers.mouser import lookup_part_number as mouser_lookup_part_number
+from .providers.page_scraper import scrape_product_page
 
 
 SANDBOX_ROOT = Path(r"C:\Users\phoen\Documents\KiCAD\CUSTOM_LIBRARIES_TEST")
@@ -45,7 +46,7 @@ WIRED_PROVIDERS = {"digikey", "mouser"}
 PROVIDER_LABELS = {
     "digikey": "DigiKey",
     "mouser": "Mouser",
-    "octopart_nexar": "Octopart Nexar",
+    "page_scrape": "Page scrape",
 }
 FIELD_LABELS = {
     "api_key": "API Key",
@@ -116,6 +117,9 @@ class MainWindow(QMainWindow):
         self.result_combo = QComboBox()
         self.result_combo.setEnabled(False)
         self.result_combo.currentIndexChanged.connect(self.lookup_result_selected)
+        self.scrape_page_button = QPushButton("Scrape Product Page")
+        self.scrape_page_button.setEnabled(False)
+        self.scrape_page_button.clicked.connect(self.scrape_selected_product_page)
 
         self.current_table = QTableWidget(0, 3)
         self.current_table.setHorizontalHeaderLabels(["Field", "Current Value", "New Value"])
@@ -175,7 +179,12 @@ class MainWindow(QMainWindow):
         result_nav_layout.addWidget(self.result_next_button)
         result_nav_layout.addStretch(1)
         lookup_form.addRow("Match", result_nav)
-        lookup_form.addRow("Result", self.result_combo)
+        result_row = QWidget()
+        result_row_layout = QHBoxLayout(result_row)
+        result_row_layout.setContentsMargins(0, 0, 0, 0)
+        result_row_layout.addWidget(self.result_combo, stretch=1)
+        result_row_layout.addWidget(self.scrape_page_button)
+        lookup_form.addRow("Result", result_row)
         layout.addLayout(lookup_form)
 
         layout.addWidget(self._build_metadata_panes(), stretch=1)
@@ -359,7 +368,7 @@ class MainWindow(QMainWindow):
     def _provider_config_fields(self, provider_name: str) -> list[str]:
         if provider_name == "mouser":
             return ["api_key"]
-        if provider_name in {"digikey", "octopart_nexar"}:
+        if provider_name == "digikey":
             return ["client_id", "client_secret"]
         return ["api_key"]
 
@@ -473,11 +482,36 @@ class MainWindow(QMainWindow):
 
     def lookup_result_selected(self, index: int) -> None:
         if index < 0:
+            self._sync_scrape_button()
             return
         part = self.result_combo.itemData(index)
         if isinstance(part, ProviderPart):
             self.apply_suggestions(part)
         self._sync_result_navigation()
+
+    def scrape_selected_product_page(self) -> None:
+        url = self._selected_product_url()
+        if not url:
+            self._show_error("No Product URL", "Select a lookup result with a ProductURL before scraping.")
+            return
+
+        self.scrape_page_button.setEnabled(False)
+        self.statusBar().showMessage("Scraping product page...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            part = scrape_product_page(url)
+        except LookupError as exc:
+            self._show_error("Product Page Scrape Failed", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._sync_scrape_button()
+
+        self.result_combo.addItem(self._lookup_result_label(part), part)
+        self.result_combo.setEnabled(True)
+        self.result_combo.setCurrentIndex(self.result_combo.count() - 1)
+        self.log_message(f"Scraped {len(part.fields)} field(s) from product page.")
+        self.statusBar().showMessage(f"Scraped {len(part.fields)} product-page field(s).")
 
     def previous_lookup_result(self) -> None:
         index = self.result_combo.currentIndex()
@@ -504,6 +538,7 @@ class MainWindow(QMainWindow):
         self.item_label.setText(f"{item.item_type}: {item.name}")
         self._seed_lookup_fields(item)
         self._populate_metadata_tables(item)
+        self._sync_scrape_button()
         self.log_message(f"Loaded {item.item_type.lower()}: {item.name}")
         self.statusBar().showMessage(f"Loaded {item.item_type}: {item.name}")
 
@@ -816,6 +851,26 @@ class MainWindow(QMainWindow):
         self.result_position_edit.setText(f"{index + 1} / {count}" if has_results else "0 / 0")
         self.result_previous_button.setEnabled(has_results and index > 0)
         self.result_next_button.setEnabled(has_results and index < count - 1)
+        self._sync_scrape_button()
+
+    def _sync_scrape_button(self) -> None:
+        self.scrape_page_button.setEnabled(bool(self._selected_product_url()))
+
+    def _selected_product_url(self) -> str:
+        part = self.result_combo.currentData()
+        if isinstance(part, ProviderPart):
+            url = part.fields.get("ProductURL", "").strip()
+            if _is_url(url):
+                return url
+        return self._current_field_value("ProductURL")
+
+    def _current_field_value(self, field_name: str) -> str:
+        row = self._find_current_field_row(field_name)
+        if row is None:
+            return ""
+        value_item = self.current_table.item(row, CURRENT_VALUE_COLUMN)
+        value = value_item.text().strip() if value_item is not None else ""
+        return value if _is_url(value) else ""
 
     def _load_providers(self) -> None:
         self.provider_combo.addItem("All configured APIs", ALL_CONFIGURED_PROVIDERS)

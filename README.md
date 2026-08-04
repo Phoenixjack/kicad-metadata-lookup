@@ -6,6 +6,8 @@ KML is intentionally separate from KiCad Import Assistant while the lookup workf
 
 Currently wired providers: Mouser and DigiKey.
 
+Experimental product-page scraping can enrich a selected result from its `ProductURL` when the distributor page allows automated access.
+
 ## Run
 
 Install the GUI dependency:

@@ -10,11 +10,6 @@
         "enabled": false,
         "client_id": "",
         "client_secret": ""
-      },
-      "octopart_nexar": {
-        "enabled": false,
-        "client_id": "",
-        "client_secret": ""
       }
     }
   },

@@ -23,11 +23,6 @@ DEFAULT_PRIVATE_DATA: dict[str, Any] = {
                 "client_id": "",
                 "client_secret": "",
             },
-            "octopart_nexar": {
-                "enabled": False,
-                "client_id": "",
-                "client_secret": "",
-            },
         },
     },
     "gui": {
@@ -39,6 +34,7 @@ DEFAULT_PRIVATE_DATA: dict[str, Any] = {
         "last_manufacturer": "",
     },
 }
+SUPPORTED_PROVIDER_NAMES = {"digikey", "mouser"}
 
 
 @dataclass(frozen=True)
@@ -80,6 +76,8 @@ def provider_statuses(private_data: dict[str, Any]) -> list[ProviderStatus]:
 
     statuses_by_name: dict[str, ProviderStatus] = {}
     for name, settings in sorted(providers.items()):
+        if name not in SUPPORTED_PROVIDER_NAMES:
+            continue
         if not isinstance(settings, dict):
             continue
         secret_values = [
@@ -98,6 +96,8 @@ def provider_statuses(private_data: dict[str, Any]) -> list[ProviderStatus]:
     legacy_keys = api_integrations.get("keys", {})
     if isinstance(legacy_keys, dict):
         for name, value in sorted(legacy_keys.items()):
+            if name not in SUPPORTED_PROVIDER_NAMES:
+                continue
             if name in statuses_by_name:
                 existing = statuses_by_name[name]
                 statuses_by_name[name] = ProviderStatus(
